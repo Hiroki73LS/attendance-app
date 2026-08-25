@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QR管理</title>
+  <style>
+    :root{ --blue:#2563eb; --gray:#e5e7eb; --dark:#1f2937; --green:#16a34a; }
+    *{box-sizing:border-box;}
+    body{font-family:"Hiragino Sans","Yu Gothic",sans-serif; margin:0; background:#f3f4f6; color:var(--dark);}
+    header{display:flex; justify-content:space-between; align-items:center; padding:14px 20px; background:#fff; border-bottom:1px solid var(--gray);}
+    header h1{font-size:18px; margin:0;}
+    a.back{font-size:14px; color:var(--blue); text-decoration:none;}
+
+    #loginBox{max-width:320px; margin:80px auto; background:#fff; padding:28px; border-radius:12px; border:1px solid var(--gray); text-align:center;}
+    #loginBox input{width:100%; padding:10px; font-size:16px; border:1px solid var(--gray); border-radius:8px; margin:12px 0;}
+    #loginBox button{width:100%; padding:10px; font-size:15px; border:none; border-radius:8px; background:var(--blue); color:#fff; cursor:pointer;}
+    #loginErr{color:#dc2626; font-size:13px; height:18px;}
+
+    #adminApp{display:none;}
+    .layout{display:grid; grid-template-columns:280px 1fr; gap:20px; max-width:900px; margin:20px auto; padding:0 16px;}
+    @media (max-width:700px){ .layout{grid-template-columns:1fr;} }
+
+    .panel{background:#fff; border:1px solid var(--gray); border-radius:12px; padding:16px;}
+    .panel h2{font-size:15px; margin:0 0 12px;}
+
+    #userList{list-style:none; margin:0; padding:0; max-height:520px; overflow-y:auto;}
+    #userList li{padding:8px 10px; border-bottom:1px solid #f0f0f0; font-size:14px; display:flex; justify-content:space-between;}
+    #userList li .uid{color:#999; font-size:12px;}
+    #userCount{font-size:13px; color:#888; margin-bottom:8px;}
+
+    .idDisplay{text-align:center; padding:14px; background:#eef2ff; border-radius:10px; font-size:22px; font-weight:bold; letter-spacing:2px; color:var(--blue); margin-bottom:14px;}
+    .idDisplay .label{font-size:12px; color:#888; font-weight:normal; display:block; margin-bottom:4px;}
+
+    #nameInput{width:100%; padding:10px; font-size:16px; border:1px solid var(--gray); border-radius:8px; margin-bottom:14px;}
+
+    #cameraBox{border-radius:10px; overflow:hidden; background:#000; position:relative; aspect-ratio:4/3;}
+    #cameraBox video{width:100%; height:100%; object-fit:cover;}
+    #scanHint{position:absolute; bottom:8px; left:0; right:0; text-align:center; color:#fff; font-size:13px; text-shadow:0 1px 2px #000;}
+
+    #regResult{margin-top:12px; padding:12px; border-radius:8px; background:#ecfdf5; color:var(--green); font-weight:bold; text-align:center; display:none;}
+    #regError{margin-top:12px; padding:12px; border-radius:8px; background:#fef2f2; color:#dc2626; font-weight:bold; text-align:center; display:none;}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>QR管理</h1>
+    <a class="back" href="index.html">← メイン画面へ</a>
+  </header>
+
+  <div id="loginBox">
+    <p>管理パスワードを入力してください</p>
+    <input type="password" id="pwInput" placeholder="パスワード">
+    <div id="loginErr"></div>
+    <button onclick="tryLogin()">入室</button>
+  </div>
+
+  <div id="adminApp">
+    <div class="layout">
+      <div class="panel">
+        <h2>登録者リスト</h2>
+        <div id="userCount"></div>
+        <ul id="userList"></ul>
+      </div>
+
+      <div class="panel">
+        <div class="idDisplay">
+          <span class="label">未使用ID候補(使わなくてもOK)</span>
+          <span id="newId">------</span>
+        </div>
+
+        <input type="text" id="nameInput" placeholder="登録者の氏名を入力">
+
+        <div id="cameraBox">
+          <video id="video" playsinline autoplay muted></video>
+          <div id="scanHint">氏名入力後、好きなQRコードをかざしてください</div>
+        </div>
+        <canvas id="canvas" style="display:none;"></canvas>
+
+        <div id="regResult">登録完了しました</div>
+        <div id="regError"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ★ここをデプロイしたGASのURLに書き換える(index.htmlと同じ値)★ -->
+  <script>
+    const API_URL = 'https://script.google.com/macros/s/★あなたのデプロイID★/exec';
+  </script>
+
+  <script>
+    let scanning = false;
+    let processing = false;
+    let jsQRLoaded = false;
+
+    async function callApi(payload) {
+      const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.message || 'APIエラー');
+      return data.result !== undefined ? data.result : data;
+    }
+
+    function tryLogin() {
+      const pw = document.getElementById('pwInput').value;
+      callApi({ action: 'checkAdminPassword', password: pw })
+        .then(ok => {
+          if (ok) {
+            document.getElementById('loginBox').style.display = 'none';
+            document.getElementById('adminApp').style.display = 'block';
+            bootAdmin();
+          } else {
+            document.getElementById('loginErr').textContent = 'パスワードが違います';
+          }
+        })
+        .catch(err => {
+          document.getElementById('loginErr').textContent = 'エラー: ' + err.message;
+        });
+    }
+    document.getElementById('pwInput').addEventListener('keydown', e => {
+      if (e.key === 'Enter') tryLogin();
+    });
+
+    function bootAdmin() {
+      refreshUserList();
+      issueNewId();
+      loadJsQR();
+    }
+
+    function refreshUserList() {
+      callApi({ action: 'getUsers' }).then(renderUserList).catch(() => {});
+    }
+    function renderUserList(users) {
+      document.getElementById('userCount').textContent = `登録人数: ${users.length}名`;
+      const ul = document.getElementById('userList');
+      ul.innerHTML = '';
+      users.forEach(u => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span>${u.name}</span><span class="uid">${u.id}</span>`;
+        ul.appendChild(li);
+      });
+    }
+
+    function issueNewId() {
+      callApi({ action: 'generateNewId' }).then(setNewId).catch(() => {});
+    }
+    function setNewId(id) {
+      document.getElementById('newId').textContent = id;
+      document.getElementById('nameInput').value = '';
+      document.getElementById('regResult').style.display = 'none';
+      document.getElementById('regError').style.display = 'none';
+    }
+
+    function loadJsQR() {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
+      script.onload = () => { jsQRLoaded = true; initCamera(); };
+      script.onerror = () => showRegError('QRライブラリの読み込みに失敗しました');
+      document.body.appendChild(script);
+    }
+
+    async function initCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        const video = document.getElementById('video');
+        video.srcObject = stream;
+        video.play();
+        scanning = true;
+        requestAnimationFrame(tick);
+      } catch (err) {
+        showRegError('カメラを起動できませんでした: ' + err.message);
+      }
+    }
+
+    function tick() {
+      const video = document.getElementById('video');
+      const canvas = document.getElementById('canvas');
+      if (scanning && jsQRLoaded && video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code && code.data) handleScan(code.data);
+      }
+      requestAnimationFrame(tick);
+    }
+
+    function handleScan(scannedId) {
+      if (processing) return;
+      const name = document.getElementById('nameInput').value.trim();
+      if (!name) {
+        showRegError('氏名を入力してから読み取ってください');
+        return;
+      }
+      processing = true;
+      document.getElementById('scanHint').textContent = '登録中...';
+      callApi({ action: 'registerUser', id: scannedId, name: name })
+        .then(onRegisterSuccess)
+        .catch(onRegisterFailure);
+    }
+
+    function onRegisterSuccess(res) {
+      document.getElementById('scanHint').textContent = '氏名入力後、好きなQRコードをかざしてください';
+      processing = false;
+      document.getElementById('regError').style.display = 'none';
+      document.getElementById('regResult').style.display = 'block';
+      renderUserList(res.users);
+      setTimeout(issueNewId, 1200);
+    }
+    function onRegisterFailure(err) {
+      processing = false;
+      showRegError('登録に失敗しました: ' + err.message);
+    }
+    function showRegError(msg) {
+      document.getElementById('regError').textContent = msg;
+      document.getElementById('regError').style.display = 'block';
+      document.getElementById('regResult').style.display = 'none';
+      setTimeout(() => { processing = false; }, 1000);
+    }
+  </script>
+</body>
+</html>

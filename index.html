@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>出退勤打刻</title>
+  <style>
+    :root{ --blue:#2563eb; --gray:#e5e7eb; --dark:#1f2937; --green:#16a34a; }
+    *{box-sizing:border-box;}
+    body{font-family:"Hiragino Sans","Yu Gothic",sans-serif; margin:0; background:#f3f4f6; color:var(--dark);}
+    header{display:flex; justify-content:space-between; align-items:center; padding:14px 20px; background:#fff; border-bottom:1px solid var(--gray);}
+    header h1{font-size:18px; margin:0;}
+    #adminBtn{padding:8px 14px; border:1px solid var(--gray); border-radius:8px; background:#fff; cursor:pointer; font-size:14px;}
+    main{max-width:480px; margin:0 auto; padding:16px;}
+    #loading{text-align:center; padding:40px; color:#888;}
+
+    .btnRow{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;}
+    .actionBtn{padding:16px 0; font-size:16px; font-weight:bold; border-radius:10px; border:2px solid var(--gray); background:#fff; cursor:pointer; transition:all .15s;}
+    .actionBtn.active{background:var(--blue); color:#fff; border-color:var(--blue);}
+
+    #cameraBox{margin-top:16px; border-radius:12px; overflow:hidden; background:#000; position:relative; aspect-ratio:4/3;}
+    #cameraBox video{width:100%; height:100%; object-fit:cover;}
+    #scanHint{position:absolute; bottom:8px; left:0; right:0; text-align:center; color:#fff; font-size:13px; text-shadow:0 1px 2px #000;}
+
+    #result{margin-top:16px; padding:16px; border-radius:10px; background:#fff; border:1px solid var(--gray); display:none;}
+    #result.show{display:block;}
+    #result .line{margin:4px 0; font-size:15px;}
+    #result .id{color:#888; font-size:13px;}
+    #result .name{font-size:20px; font-weight:bold;}
+    #result .action{color:var(--green); font-weight:bold;}
+
+    #errorMsg{color:#dc2626; margin-top:10px; font-size:14px; display:none;}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>出退勤打刻</h1>
+    <button id="adminBtn" onclick="location.href='admin.html'">QR管理</button>
+  </header>
+
+  <main>
+    <div id="loading">読み込み中...</div>
+
+    <div id="app" style="display:none;">
+      <div class="btnRow">
+        <button class="actionBtn" id="btn-出勤" onclick="selectAction('出勤')">出勤</button>
+        <button class="actionBtn" id="btn-退勤" onclick="selectAction('退勤')">退勤</button>
+      </div>
+      <div class="btnRow">
+        <button class="actionBtn" id="btn-外出" onclick="selectAction('外出')">外出→</button>
+        <button class="actionBtn" id="btn-戻り" onclick="selectAction('戻り')">←戻り</button>
+      </div>
+
+      <div id="cameraBox">
+        <video id="video" playsinline autoplay muted></video>
+        <div id="scanHint">QRコードをかざしてください</div>
+      </div>
+      <canvas id="canvas" style="display:none;"></canvas>
+
+      <div id="errorMsg"></div>
+
+      <div id="result">
+        <div class="line id">ID・・・<span id="r-id"></span></div>
+        <div class="line name" id="r-name"></div>
+        <div class="line action"><span id="r-action"></span>&nbsp;:&nbsp;<span id="r-time"></span></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ★ここをデプロイしたGASのURLに書き換える★ -->
+  <script>
+    const API_URL = 'https://script.google.com/macros/s/★あなたのデプロイID★/exec';
+  </script>
+
+  <script>
+    let currentAction = '出勤';
+    let scanning = false;
+    let processingId = null;
+
+    window.addEventListener('load', () => {
+      setDefaultActionByTime();
+      loadHeavyResources();
+    });
+
+    function setDefaultActionByTime() {
+      const h = new Date().getHours();
+      currentAction = (h >= 0 && h < 12) ? '出勤' : '退勤';
+      updateButtonStyles();
+    }
+    function selectAction(action) {
+      currentAction = action;
+      updateButtonStyles();
+    }
+    function updateButtonStyles() {
+      ['出勤','退勤','外出','戻り'].forEach(a => {
+        document.getElementById('btn-' + a).classList.toggle('active', a === currentAction);
+      });
+    }
+
+    function loadHeavyResources() {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
+      script.onload = initCamera;
+      script.onerror = () => showError('QRライブラリの読み込みに失敗しました');
+      document.body.appendChild(script);
+    }
+
+    async function initCamera() {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        const video = document.getElementById('video');
+        video.srcObject = stream;
+        video.play();
+        scanning = true;
+        requestAnimationFrame(tick);
+      } catch (err) {
+        showError('カメラを起動できませんでした: ' + err.message);
+      }
+    }
+
+    function tick() {
+      const video = document.getElementById('video');
+      const canvas = document.getElementById('canvas');
+      if (scanning && video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code && code.data) handleScan(code.data);
+      }
+      requestAnimationFrame(tick);
+    }
+
+    function handleScan(id) {
+      if (processingId) return;
+      processingId = id;
+      document.getElementById('scanHint').textContent = '処理中...';
+      callApi({ action: 'recordAttendance', id: id, attendanceAction: currentAction })
+        .then(onRecordSuccess)
+        .catch(onRecordFailure);
+    }
+
+    function onRecordSuccess(res) {
+      document.getElementById('scanHint').textContent = 'QRコードをかざしてください';
+      if (!res.ok) {
+        showError(res.message);
+        releaseAfterDelay();
+        return;
+      }
+      document.getElementById('errorMsg').style.display = 'none';
+      document.getElementById('r-id').textContent = res.id;
+      document.getElementById('r-name').textContent = res.name;
+      document.getElementById('r-action').textContent = res.action;
+      document.getElementById('r-time').textContent = res.timestamp;
+      document.getElementById('result').classList.add('show');
+      releaseAfterDelay();
+    }
+    function onRecordFailure(err) {
+      showError('打刻に失敗しました: ' + err.message);
+      releaseAfterDelay();
+    }
+    function releaseAfterDelay() {
+      setTimeout(() => { processingId = null; }, 2500);
+    }
+    function showError(msg) {
+      const el = document.getElementById('errorMsg');
+      el.textContent = msg;
+      el.style.display = 'block';
+    }
+
+    /**
+     * GAS APIを叩く共通関数。
+     * Content-Typeを明示しない(text/plain扱いにする)ことでプリフライトを回避する。
+     */
+    async function callApi(payload) {
+      const res = await fetch(API_URL, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.message || 'APIエラー');
+      // action種別によって返却構造が違うので、その場合はそのまま返す
+      return data.result !== undefined ? data.result : data;
+    }
+  </script>
+</body>
+</html>
