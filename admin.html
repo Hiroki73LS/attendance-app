@@ -18,15 +18,21 @@
     #loginErr{color:#dc2626; font-size:13px; height:18px;}
 
     #adminApp{display:none;}
-    .layout{display:grid; grid-template-columns:280px 1fr; gap:20px; max-width:900px; margin:20px auto; padding:0 16px;}
-    @media (max-width:700px){ .layout{grid-template-columns:1fr;} }
+    .layout{display:grid; grid-template-columns:340px 1fr; gap:24px; max-width:1200px; margin:20px auto; padding:0 16px;}
+    @media (max-width:820px){ .layout{grid-template-columns:1fr;} }
 
     .panel{background:#fff; border:1px solid var(--gray); border-radius:12px; padding:16px;}
     .panel h2{font-size:15px; margin:0 0 12px;}
 
     #userList{list-style:none; margin:0; padding:0; max-height:520px; overflow-y:auto;}
-    #userList li{padding:8px 10px; border-bottom:1px solid #f0f0f0; font-size:14px; display:flex; justify-content:space-between;}
-    #userList li .uid{color:#999; font-size:12px;}
+    #userList li{
+      padding:8px 10px; border-bottom:1px solid #f0f0f0; font-size:14px;
+      display:flex; align-items:center; gap:10px;
+    }
+    #userList li .uname{
+      flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    #userList li .uid{color:#999; font-size:12px; flex-shrink:0;}
     #userCount{font-size:13px; color:#888; margin-bottom:8px;}
 
     .idDisplay{text-align:center; padding:14px; background:#eef2ff; border-radius:10px; font-size:22px; font-weight:bold; letter-spacing:2px; color:var(--blue); margin-bottom:14px;}
@@ -85,13 +91,16 @@
 
   <!-- ★ここをデプロイしたGASのURLに書き換える(index.htmlと同じ値)★ -->
   <script>
-    const API_URL = 'https://script.google.com/macros/s/AKfycbyR9O3uEBOPeMazQ1u2qi4QpAdjgdihW7t__Y2Q7lna_6x_Ay5gymYsqb9jH23aNJx1/exec';
+    const API_URL = 'https://script.google.com/macros/s/★あなたのデプロイID★/exec';
   </script>
 
   <script>
     let scanning = false;
     let processing = false;
     let jsQRLoaded = false;
+    let regState = 'loading'; // 'loading'(登録準備中:読み取り無視) | 'ready'(登録待機中:読み取り受付)
+    let lastRegisteredId = null;
+    let ignoreLastIdUntil = 0;
 
     async function callApi(payload) {
       const res = await fetch(API_URL, { method: 'POST', body: JSON.stringify(payload) });
@@ -135,12 +144,15 @@
       ul.innerHTML = '';
       users.forEach(u => {
         const li = document.createElement('li');
-        li.innerHTML = `<span>${u.name}</span><span class="uid">${u.id}</span>`;
+        const shortId = u.id.length > 8 ? u.id.slice(0, 8) + '…' : u.id;
+        li.innerHTML = `<span class="uname">${u.name}</span><span class="uid">${shortId}</span>`;
         ul.appendChild(li);
       });
     }
 
     function issueNewId() {
+      regState = 'loading';
+      updateScanHint();
       callApi({ action: 'generateNewId' }).then(setNewId).catch(() => {});
     }
     function setNewId(id) {
@@ -148,6 +160,16 @@
       document.getElementById('nameInput').value = '';
       document.getElementById('regResult').style.display = 'none';
       document.getElementById('regError').style.display = 'none';
+      regState = 'ready';
+      updateScanHint();
+    }
+    function updateScanHint() {
+      const hint = document.getElementById('scanHint');
+      if (regState === 'loading') {
+        hint.textContent = '登録準備中...';
+      } else {
+        hint.textContent = '登録待機中:氏名入力後、好きなQRコードをかざしてください';
+      }
     }
 
     function loadJsQR() {
@@ -188,28 +210,40 @@
 
     function handleScan(scannedId) {
       if (processing) return;
+      if (regState !== 'ready') return; // 準備中は読み取りを無視
+      // 直前に登録したQRがまだカメラに映っている場合は無視(まだ手元に残っている間の誤反応防止)
+      if (scannedId === lastRegisteredId && Date.now() < ignoreLastIdUntil) return;
+
       const name = document.getElementById('nameInput').value.trim();
       if (!name) {
         showRegError('氏名を入力してから読み取ってください');
         return;
       }
       processing = true;
+      regState = 'loading';
       document.getElementById('scanHint').textContent = '登録中...';
       callApi({ action: 'registerUser', id: scannedId, name: name })
-        .then(onRegisterSuccess)
+        .then(res => onRegisterSuccess(res, scannedId))
         .catch(onRegisterFailure);
     }
 
-    function onRegisterSuccess(res) {
-      document.getElementById('scanHint').textContent = '氏名入力後、好きなQRコードをかざしてください';
+    function onRegisterSuccess(res, scannedId) {
       processing = false;
       document.getElementById('regError').style.display = 'none';
       document.getElementById('regResult').style.display = 'block';
       renderUserList(res.users);
-      setTimeout(issueNewId, 1200);
+
+      // このQRはしばらく再登録扱いしない(QRを片付ける時間を確保)
+      lastRegisteredId = scannedId;
+      ignoreLastIdUntil = Date.now() + 4000;
+
+      // 少し間を置いてから次のIDを発行し、待機状態に戻す
+      setTimeout(issueNewId, 1500);
     }
     function onRegisterFailure(err) {
       processing = false;
+      regState = 'ready';
+      updateScanHint();
       showRegError('登録に失敗しました: ' + err.message);
     }
     function showRegError(msg) {
